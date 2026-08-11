@@ -67,7 +67,7 @@ void on_new(GtkWidget *widget, gpointer data) {
     update_title();
 }
 
-// Open file
+// Open file (PORTABILITY FIX: Use GLib file handling and UTF-8 validation)
 void on_open(GtkWidget *widget, gpointer data) {
     GtkWidget *dialog = gtk_file_chooser_dialog_new(
         "Open File",
@@ -81,46 +81,48 @@ void on_open(GtkWidget *widget, gpointer data) {
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
         
-        FILE *file = fopen(filename, "r");
-        if (file) {
-            fseek(file, 0, SEEK_END);
-            long size = ftell(file);
-            fseek(file, 0, SEEK_SET);
-            
-            char *content = malloc(size + 1);
-            size_t read_size = fread(content, 1, size, file);
-            content[read_size] = '\0';
-            fclose(file);
-            
-            gtk_text_buffer_set_text(app_state.text_buffer, content, -1);
-            free(content);
-            
-            if (app_state.current_file) {
-                g_free(app_state.current_file);
-            }
-            app_state.current_file = g_strdup(filename);
-            app_state.modified = FALSE;
-            update_title();
-        } else {
-            GtkWidget *error = gtk_message_dialog_new(
-                GTK_WINDOW(app_state.window),
-                GTK_DIALOG_MODAL,
-                GTK_MESSAGE_ERROR,
-                GTK_BUTTONS_OK,
-                "Could not open file"
-            );
-            gtk_dialog_run(GTK_DIALOG(error));
-            gtk_widget_destroy(error);
-        }
+        gchar *content = NULL;
+        gsize length = 0;
+        GError *error = NULL;
         
+        // g_file_get_contents is cross-platform safe and handles memory automatically
+        if (g_file_get_contents(filename, &content, &length, &error)) {
+            // GTK crashes if you feed it non-UTF8 data (like binaries). Check first.
+            if (g_utf8_validate(content, length, NULL)) {
+                gtk_text_buffer_set_text(app_state.text_buffer, content, -1);
+                
+                if (app_state.current_file) g_free(app_state.current_file);
+                app_state.current_file = g_strdup(filename);
+                app_state.modified = FALSE;
+                update_title();
+            } else {
+                GtkWidget *err_dialog = gtk_message_dialog_new(
+                    GTK_WINDOW(app_state.window), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                    GTK_BUTTONS_OK, "File is not valid UTF-8 text."
+                );
+                gtk_dialog_run(GTK_DIALOG(err_dialog));
+                gtk_widget_destroy(err_dialog);
+            }
+            g_free(content);
+        } else {
+            GtkWidget *err_dialog = gtk_message_dialog_new(
+                GTK_WINDOW(app_state.window), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                GTK_BUTTONS_OK, "Error opening file:\n%s", error->message
+            );
+            gtk_dialog_run(GTK_DIALOG(err_dialog));
+            gtk_widget_destroy(err_dialog);
+            g_error_free(error);
+        }
         g_free(filename);
     }
-    
     gtk_widget_destroy(dialog);
 }
 
-// Save file
+// Save file (PORTABILITY FIX: Atomic saving via GLib)
 void on_save(GtkWidget *widget, gpointer data) {
+    // Need to forward declare on_save_as for standard C compliance
+    void on_save_as(GtkWidget *widget, gpointer data);
+    
     if (!app_state.current_file) {
         on_save_as(widget, data);
         return;
@@ -131,22 +133,20 @@ void on_save(GtkWidget *widget, gpointer data) {
     gtk_text_buffer_get_end_iter(app_state.text_buffer, &end);
     char *content = gtk_text_buffer_get_text(app_state.text_buffer, &start, &end, FALSE);
     
-    FILE *file = fopen(app_state.current_file, "w");
-    if (file) {
-        fputs(content, file);
-        fclose(file);
+    GError *error = NULL;
+    
+    // g_file_set_contents creates a temporary file and renames it safely (Atomic save)
+    if (g_file_set_contents(app_state.current_file, content, -1, &error)) {
         app_state.modified = FALSE;
         update_title();
     } else {
-        GtkWidget *error = gtk_message_dialog_new(
-            GTK_WINDOW(app_state.window),
-            GTK_DIALOG_MODAL,
-            GTK_MESSAGE_ERROR,
-            GTK_BUTTONS_OK,
-            "Could not save file"
+        GtkWidget *err_dialog = gtk_message_dialog_new(
+            GTK_WINDOW(app_state.window), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+            GTK_BUTTONS_OK, "Could not save file:\n%s", error->message
         );
-        gtk_dialog_run(GTK_DIALOG(error));
-        gtk_widget_destroy(error);
+        gtk_dialog_run(GTK_DIALOG(err_dialog));
+        gtk_widget_destroy(err_dialog);
+        g_error_free(error);
     }
     
     g_free(content);
@@ -271,7 +271,7 @@ void on_about(GtkWidget *widget, gpointer data) {
         GTK_DIALOG_MODAL,
         GTK_MESSAGE_INFO,
         GTK_BUTTONS_OK,
-        "Simple Notepad\nVersion 1.0\n\nA cross-platform text editor"
+        "Simple Notepad\nVersion 1.1 (Portable)\n\nA cross-platform text editor"
     );
     gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
